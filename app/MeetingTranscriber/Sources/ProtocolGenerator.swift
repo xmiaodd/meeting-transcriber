@@ -108,9 +108,9 @@ enum ProtocolGenerator {
     static func saveTranscript(_ text: String, title: String, dir: URL) throws -> URL {
         let accessing = dir.startAccessingSecurityScopedResource()
         defer { if accessing { dir.stopAccessingSecurityScopedResource() } }
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try ensureWritable(dir)
         let url = dir.appendingPathComponent(filename(title: title, ext: "txt"))
-        try text.write(to: url, atomically: true, encoding: .utf8)
+        try write(text, to: url)
         logger.info("Transcript saved: \(url.lastPathComponent)")
         return url
     }
@@ -121,11 +121,41 @@ enum ProtocolGenerator {
     static func saveProtocol(_ markdown: String, title: String, dir: URL) throws -> URL {
         let accessing = dir.startAccessingSecurityScopedResource()
         defer { if accessing { dir.stopAccessingSecurityScopedResource() } }
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try ensureWritable(dir)
         let url = dir.appendingPathComponent(filename(title: title, ext: "md"))
-        try markdown.write(to: url, atomically: true, encoding: .utf8)
+        try write(markdown, to: url)
         logger.info("Protocol saved: \(url.lastPathComponent)")
         return url
+    }
+
+    /// Create `dir` if needed and confirm we can actually write into it.
+    ///
+    /// `startAccessingSecurityScopedResource()` returns `false` when the
+    /// bookmark behind `dir` no longer grants access (the failure mode that
+    /// silently killed the pipeline with a bare `NSCocoaErrorDomain 516`).
+    /// Surfacing it here gives callers a typed, actionable error instead.
+    private static func ensureWritable(_ dir: URL) throws {
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        } catch {
+            throw ProtocolError.outputDirNotWritable(dir.path)
+        }
+        guard FileManager.default.isWritableFile(atPath: dir.path) else {
+            throw ProtocolError.outputDirNotWritable(dir.path)
+        }
+    }
+
+    /// Write atomically, translating a sandbox-permission failure into
+    /// `outputDirNotWritable` so the pipeline reports the real cause rather
+    /// than the raw Cocoa/`EEXIST` errno.
+    private static func write(_ text: String, to url: URL) throws {
+        do {
+            try text.write(to: url, atomically: true, encoding: .utf8)
+        } catch let error as NSError
+            where error.domain == NSCocoaErrorDomain
+            && (error.code == NSFileWriteNoPermissionError || error.code == 516) {
+            throw ProtocolError.outputDirNotWritable(url.deletingLastPathComponent().path)
+        }
     }
 
     private static let filenameFormatter: DateFormatter = {
@@ -189,6 +219,11 @@ enum ProtocolError: LocalizedError {
     case emptyProtocol
     case httpError(Int, String)
     case connectionFailed(String)
+    /// The output directory could not be written to — almost always because the
+    /// user-picked folder's security-scoped bookmark no longer grants sandbox
+    /// access (folder moved, restored from backup, or the app's TCC grant was
+    /// reset). Re-selecting the folder in Settings → Output fixes it.
+    case outputDirNotWritable(String)
 
     var errorDescription: String? {
         switch self {
@@ -205,6 +240,9 @@ enum ProtocolError: LocalizedError {
         case let .httpError(code, body): "HTTP \(code)\(body.isEmpty ? "" : ": \(body)")"
 
         case let .connectionFailed(reason): "Connection failed: \(reason)"
+
+        case let .outputDirNotWritable(path):
+            "Can't write to output folder (\(path)). Re-select it in Settings → Output to restore access."
         }
     }
 }

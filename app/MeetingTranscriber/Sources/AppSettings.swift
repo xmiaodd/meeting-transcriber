@@ -1,3 +1,4 @@
+import os.log
 import SwiftUI
 
 // SwiftFormat strips redundant raw values matching their case name, which then
@@ -371,16 +372,35 @@ final class AppSettings {
         set { defaults.set(newValue, forKey: "customOutputDirBookmark") }
     }
 
-    /// Resolved URL from the security-scoped bookmark. Calls `startAccessingSecurityScopedResource()`.
-    var customOutputDir: URL? {
-        guard let data = customOutputDirBookmark else { return nil }
+    /// Outcome of resolving the custom output-directory bookmark. Distinguishes
+    /// "no custom dir chosen" from "a custom dir is configured but its
+    /// security-scoped bookmark no longer resolves" — the latter means writes
+    /// into `Documents/`-style locations will be denied by the sandbox, which
+    /// previously surfaced only as an opaque `NSCocoaErrorDomain 516` deep in
+    /// the pipeline.
+    enum OutputDirStatus {
+        case ok(URL)
+        case noCustomDir
+        case bookmarkUnresolvable
+    }
+
+    /// Resolve the custom output-directory bookmark, reporting *why* it failed.
+    var customOutputDirStatus: OutputDirStatus {
+        guard let data = customOutputDirBookmark else { return .noCustomDir }
         var isStale = false
         guard let url = try? URL(
             resolvingBookmarkData: data,
             options: .withSecurityScope,
             relativeTo: nil,
             bookmarkDataIsStale: &isStale,
-        ) else { return nil }
+        ) else {
+            // The bookmark is present but no longer yields a security scope
+            // (e.g. the folder moved or was restored from backup). Re-selecting
+            // the folder in Settings regenerates a valid bookmark.
+            Logger(subsystem: AppPaths.logSubsystem, category: "AppSettings")
+                .error("customOutputDirBookmark failed to resolve with security scope — output folder must be re-selected in Settings")
+            return .bookmarkUnresolvable
+        }
         if isStale {
             // Re-create bookmark from resolved URL
             if let newData = try? url.bookmarkData(
@@ -389,9 +409,21 @@ final class AppSettings {
                 relativeTo: nil,
             ) {
                 customOutputDirBookmark = newData
+            } else {
+                Logger(subsystem: AppPaths.logSubsystem, category: "AppSettings")
+                    .error("customOutputDirBookmark is stale and could not be regenerated — output folder must be re-selected in Settings")
+                return .bookmarkUnresolvable
             }
         }
-        return url
+        return .ok(url)
+    }
+
+    /// Resolved URL from the security-scoped bookmark. Calls `startAccessingSecurityScopedResource()`.
+    /// Falls back to `nil` when no custom dir is set or the bookmark is dead —
+    /// use `customOutputDirStatus` when the distinction matters.
+    var customOutputDir: URL? {
+        if case let .ok(url) = customOutputDirStatus { return url }
+        return nil
     }
 
     /// Store a user-selected directory as a security-scoped bookmark.

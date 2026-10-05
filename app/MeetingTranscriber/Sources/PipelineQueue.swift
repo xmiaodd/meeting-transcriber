@@ -1000,6 +1000,40 @@ class PipelineQueue {
         return finalTranscript
     }
 
+    /// Save a transcript, falling back to the default output dir when the
+    /// configured one can't be written.
+    ///
+    /// `outputDir` is a plain URL here, so the pipeline cannot tell whether its
+    /// security-scoped bookmark still grants sandbox access — `isWritableFile`
+    /// answers `true` even for a path the sandbox will deny. The only reliable
+    /// signal is the write attempt itself, so try the real destination first and
+    /// retry against the default dir on a permission failure. The recording is
+    /// reclaimed work; it must not be discarded because a bookmark went stale.
+    private func saveTranscript(
+        _ text: String, ctx: JobContext, outputDir: URL,
+    ) -> (url: URL, resolvedDir: URL, fellBack: Bool) {
+        let protocolsDir = outputDir.appendingPathComponent("protocols")
+        do {
+            return (try ProtocolGenerator.saveTranscript(text, title: ctx.title, dir: protocolsDir), outputDir, false)
+        } catch ProtocolError.outputDirNotWritable {
+            let fallbackDir = AppPaths.downloadsProtocolsDir
+            let fallback = fallbackDir.appendingPathComponent("protocols")
+            guard let url = try? ProtocolGenerator.saveTranscript(text, title: ctx.title, dir: fallback) else {
+                addWarning(id: ctx.jobID, "Could not save transcript to any output folder.")
+                return (protocolsDir.appendingPathComponent("(unsaved)"), outputDir, true)
+            }
+            addWarning(
+                id: ctx.jobID,
+                "Output folder unavailable — saved to \(fallback.path). Re-select the folder in Settings → Output.",
+            )
+            logger.warning("[\(ctx.shortID, privacy: .public)] output_dir_fallback path=\(fallback.path, privacy: .public)")
+            return (url, fallbackDir, true)
+        } catch {
+            addWarning(id: ctx.jobID, "Could not save transcript to any output folder.")
+            return (protocolsDir.appendingPathComponent("(unsaved)"), outputDir, true)
+        }
+    }
+
     /// Stage 3 — persist the transcript + audio, run protocol generation
     /// (unless speaker naming is still pending), and transition the job to its
     /// terminal state.
@@ -1008,8 +1042,12 @@ class PipelineQueue {
         ctx: JobContext, workDir: URL, outputDir: URL,
     ) async throws {
         // --- Save Transcript & Audio (always) ---
-        let protocolsDir = outputDir.appendingPathComponent("protocols")
-        let txtPath = try ProtocolGenerator.saveTranscript(finalTranscript, title: ctx.title, dir: protocolsDir)
+        // `resolvedDir` is where the transcript actually landed — the default
+        // dir when the configured one's bookmark no longer grants access. Keep
+        // every downstream artifact in the same place so a fallback is coherent
+        // rather than split across two folders.
+        let (txtPath, resolvedDir, _) = saveTranscript(finalTranscript, ctx: ctx, outputDir: outputDir)
+        let protocolsDir = resolvedDir.appendingPathComponent("protocols")
         logger.info("[\(ctx.shortID, privacy: .public)] transcript_saved file=\(txtPath.lastPathComponent, privacy: .public)")
 
         if let idx = jobs.firstIndex(where: { $0.id == ctx.jobID }) {
@@ -1017,7 +1055,7 @@ class PipelineQueue {
             jobs[idx].namingSlug = ctx.slug
         }
 
-        let recordingsDir = outputDir.appendingPathComponent("recordings")
+        let recordingsDir = resolvedDir.appendingPathComponent("recordings")
         Self.copyAudioToOutput(
             mixPath: ctx.mixPath, appPath: ctx.appPath, micPath: ctx.micPath,
             title: ctx.title, outputDir: recordingsDir,
