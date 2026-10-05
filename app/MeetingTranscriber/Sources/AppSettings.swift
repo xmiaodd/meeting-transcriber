@@ -20,18 +20,29 @@ enum TranscriptionEngineSetting: String, CaseIterable, Codable {
     }
 
     /// Whether this engine is available on the current macOS version.
+    ///
+    /// `.qwen3` is always unavailable: its upstream backend (FluidAudio) was
+    /// removed as experimental, and the shipped code aborts the app inside the
+    /// Metal SDPA kernel during decoding. Kept as a case only so a previously
+    /// saved selection is recognised and migrated — never offered.
     var isAvailable: Bool {
         switch self {
         case .whisperKit, .parakeet: true
-
-        case .qwen3:
-            if #available(macOS 15, *) { true } else { false }
+        case .qwen3: false
         }
     }
 
     /// Cases available on the current platform. Used in UI pickers instead of allCases.
     static var availableCases: [Self] {
         allCases.filter(\.isAvailable)
+    }
+
+    /// The engine to use given what was persisted, falling back to the default
+    /// when the stored value is no longer selectable (e.g. `.qwen3`).
+    static func resolved(fromStored raw: String?) -> Self {
+        let stored = raw.flatMap(Self.init(rawValue:))
+        guard let stored, stored.isAvailable else { return .whisperKit }
+        return stored
     }
 
     /// Whether the engine implements `transcribeSamples([Float])` so the
@@ -506,8 +517,8 @@ final class AppSettings {
         liveTranscriptionEnabled = defaults.object(forKey: "liveTranscriptionEnabled") as? Bool ?? false
         asymmetricSilenceWarningSeconds = max(30, min(300, defaults.object(forKey: "asymmetricSilenceWarningSeconds") as? Double ?? 90))
 
-        transcriptionEngine = (defaults.string(forKey: "transcriptionEngine")
-            .flatMap(TranscriptionEngineSetting.init(rawValue:))) ?? .whisperKit
+        transcriptionEngine = TranscriptionEngineSetting.resolved(
+            fromStored: defaults.string(forKey: "transcriptionEngine"))
         whisperKitModel = defaults.object(forKey: "whisperKitModel") as? String
             ?? "openai_whisper-large-v3-v20240930_turbo"
         whisperLanguage = defaults.object(forKey: "whisperLanguage") as? String ?? "de"
