@@ -338,6 +338,13 @@ enum AudioMixer {
         // Probe rate without loading all samples — O(1) for WAV/MP3/M4A
         if let audioFile = try? AVAudioFile(forReading: source),
            Int(audioFile.processingFormat.sampleRate) == targetRate {
+            // `copyItem` throws `EEXIST` when the destination already exists.
+            // That is not hypothetical: a job retried after a crash re-enters
+            // `processNext()` with a `workDir` left over from the failed run, so
+            // a same-named `app_16k.wav` / `mic_16k.wav` survives and the copy
+            // fails — silently dropping that track from the transcript. Clear the
+            // destination first.
+            try? FileManager.default.removeItem(at: destination)
             try FileManager.default.copyItem(at: source, to: destination)
             return
         }
